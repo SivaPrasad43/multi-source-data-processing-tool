@@ -112,7 +112,7 @@ func CreateConfiguration(c *gofr.Context) (interface{}, error) {
 			fmt.Println("error in yaml marshal = ", err)
 		}
 
-		err = ioutil.WriteFile("createdata.yaml", Createdata, 066)
+		err = ioutil.WriteFile("createdata.yaml", Createdata, 0644)
 		if err != nil {
 			fmt.Println("error in writing = ", err)
 		}

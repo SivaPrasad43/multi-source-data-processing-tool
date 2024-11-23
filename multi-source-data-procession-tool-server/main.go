@@ -23,8 +23,9 @@ type ConfigData struct {
 }
 
 type DataSource struct {
-	Source int      `yaml:"Source" json:"Source"`
-	Config []Config `yaml:"TYPEOF" json:"TYPEOF"`
+	Source    int      `yaml:"Source" json:"Source"`
+	InputName string   `yaml:"NAME" json:"NAME"`
+	Config    []Config `yaml:"TYPEOF" json:"TYPEOF"`
 }
 
 type Config struct {

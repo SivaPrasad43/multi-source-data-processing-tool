@@ -54,6 +54,7 @@ type SaleRecord struct {
 }
 
 var client *resty.Client
+var DestinationConfig map[int][]Config
 
 // main function initializes the GoFr app and sets up routes
 func main() {
@@ -67,7 +68,7 @@ func main() {
 
 	app.GET("/loadConfiguration", LoadConfiguration)
 
-	app.POST("/deployConfigData", DeployConfigData)
+	app.POST("/deployConfiguration", DeployConfiguration)
 
 	// Health check route
 	app.GET("/health", HealthCheckHandler)
@@ -75,44 +76,34 @@ func main() {
 	app.Run()
 }
 
-func HttpDataCall(config Config) {
-
-	// Make an HTTP GET request
-	resp, err := client.R().Get(config.URL) // A URL that will return 500 error
-	if err != nil {
-		fmt.Println("Error occurred:", err)
-		return
-	}
-
-	fmt.Println("resp = ", resp.Body())
-
-	if resp.StatusCode() == 200 {
-
-	}
-
-}
-
 func CreateConfiguration(c *gofr.Context) (interface{}, error) {
 	defer PanicRecoveryMiddleware()
 
-	var CreateData configDataStruct
+	var (
+		configType string
+		inputData  configDataStruct
+	)
+
+	configType = c.Param("configType")
+
 	// Extract JSON body into the 'Person' struct
-	err := c.Bind(&CreateData)
+	err := c.Bind(&inputData)
 	if err != nil {
 		fmt.Print("errror = ", err)
 		return nil, err
 	}
 
-	fmt.Println("CreateData = ", CreateData)
+	fileName := configType + ".yaml"
+	fmt.Println("input Data = ", inputData)
 
-	if len(CreateData.DataSourceConfig) > 0 {
-		Createdata, err := yaml.Marshal(CreateData)
+	if len(inputData.DataSourceConfig) > 0 {
+		fileData, err := yaml.Marshal(inputData)
 
 		if err != nil {
 			fmt.Println("error in yaml marshal = ", err)
 		}
 
-		err = ioutil.WriteFile("createdata.yaml", Createdata, 0644)
+		err = ioutil.WriteFile(fileName, fileData, 0644)
 		if err != nil {
 			fmt.Println("error in writing = ", err)
 		}
@@ -120,7 +111,7 @@ func CreateConfiguration(c *gofr.Context) (interface{}, error) {
 		return nil, errors.New("Empty data")
 	}
 
-	return "SUSSUSEFUL", err
+	return "SUCCESSFULL", err
 
 }
 
@@ -128,7 +119,9 @@ func LoadConfiguration(c *gofr.Context) (interface{}, error) {
 
 	defer PanicRecoveryMiddleware()
 
-	readData, err := ioutil.ReadFile("createdata.yaml")
+	configType := c.Param("configType")
+
+	readData, err := ioutil.ReadFile(configType + ".yaml")
 	if err != nil {
 		fmt.Println("Failed to load config: ", err)
 		return nil, err
@@ -138,84 +131,64 @@ func LoadConfiguration(c *gofr.Context) (interface{}, error) {
 
 }
 
-func DeployConfigData(c *gofr.Context) (interface{}, error) {
+func DeployConfiguration(c *gofr.Context) (interface{}, error) {
 
 	defer PanicRecoveryMiddleware()
 
-	var CreateData configDataStruct
+	var (
+		configType    string
+		incommingData configDataStruct
+	)
+
+	configType = c.Param("configType")
+	fmt.Println("configType = ", configType)
+
+	// //  kill the running threads of the previous configuration
+	// for topic, stopChannel := range RunningThreads {
+	// 	stopChannel <- true
+	// }
+
 	// Extract JSON body into the 'Person' struct
-	err := c.Bind(&CreateData)
+	err := c.Bind(&incommingData)
 	if err != nil {
 		return nil, err
 	}
 
-	for _, conf := range CreateData.DataSourceConfig {
+	if configType == "sourceConfig" {
 
-		for _, typeof := range conf.Config {
-			switch typeof.TYPE {
-			case "HTTP":
-				fmt.Println("HTTP")
-				HttpDataCall(typeof)
-			case "FILE":
-				fmt.Println("FILE")
-			case "DB":
-				fmt.Println("DB")
-				DataBaseFetchData(typeof)
-			case "KAFKA":
-				fmt.Println("KAFKA")
-				// RunningThreads[topic] = make(chan bool) // Create a stop channel for each topic
-				startkafkaSubscription(conf.Source, typeof.IP, typeof.Port, typeof.TopicName)
-			default:
-				fmt.Println("Unknown")
+		for _, conf := range incommingData.DataSourceConfig {
 
+			for _, typeof := range conf.Config {
+				switch typeof.TYPE {
+				case "HTTP":
+					fmt.Println("HTTP input handler")
+					HttpDataCall(typeof)
+				case "FILE":
+					fmt.Println("File input handler")
+				case "DB":
+					fmt.Println("DB input handler")
+					DataBaseFetchData(typeof)
+				case "KAFKA":
+					fmt.Println("kafka input handler")
+					// RunningThreads[topic] = make(chan bool) // Create a stop channel for each topic
+					startkafkaSubscription(conf.Source, typeof.IP, typeof.Port, typeof.TopicName)
+				default:
+					fmt.Println("Unknown")
+
+				}
 			}
 		}
-	}
 
-	return "SUSSUSEFUL", err
+	} else if configType == "destinationConfig" {
+		fmt.Println("destination config")
+		for _, config := range incommingData.DataSourceConfig {
 
-}
-
-// sendToOutput sends transformed data to an external HTTP API
-func sendToOutput(url string, data []SaleRecord) error {
-	// Marshal the data into JSON format
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-
-	// Make an HTTP POST request to the external API
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	// Check for successful response
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := ioutil.ReadAll(resp.Body)
-		log.Printf("Error response from API: %s", string(bodyBytes))
-		return err
-	}
-
-	return nil
-}
-
-// HealthCheckHandler is a basic route for checking the service status
-func HealthCheckHandler(c *gofr.Context) (interface{}, error) {
-	return "Service is up!", nil
-}
-
-// PanicRecoveryMiddleware handles panic and recovers gracefully
-func PanicRecoveryMiddleware() {
-
-	// Use defer to recover from panics
-	defer func() {
-		if r := recover(); r != nil {
-			// Log the panic details
-			log.Printf("Recovered from panic: ", r)
+			DestinationConfig[config.Source] = config.Config
 		}
-	}()
+
+	}
+
+	return "SUCCESSFULL", err
 
 }
 
@@ -246,9 +219,34 @@ func processData(sourceID int, data []byte) {
 	// or you can store it in a database
 	// For this example, we'll just print it
 	log.Println(string(data))
+	if config, ok := DestinationConfig[sourceID]; ok {
+		// Send data to destination service
+		// For this example, we'll just print it
+		log.Println("Sending data to destination service")
+		for _, config := range config {
+			switch config.TYPE {
+			case "HTTP":
+				fmt.Println("HTTP input handler")
+				// publishDataToHTTP(sou)
+			case "FILE":
+				fmt.Println("File input handler")
+				// publishDataToFile(sourceID, data)
+			case "DB":
+				fmt.Println("DB input handler")
+				// publishDataToDB(typeof)
+			case "KAFKA":
+				fmt.Println("kafka input handler")
+				// RunningThreads[topic] = make(chan bool) // Create a stop channel for each topic
+				publishDataToKafka(config.IP, config.Port, config.TopicName, string(data))
+			default:
+				fmt.Println("Unknown")
 
+			}
+		}
+	}
 }
-func publisDataToKafka(ip string, port string, topicName string, data string) {
+
+func publishDataToKafka(ip string, port string, topicName string, data string) {
 
 	// Set up Kafka producer
 	producer, err := sarama.NewSyncProducer([]string{ip + ":" + port}, nil)
@@ -270,7 +268,6 @@ func publisDataToKafka(ip string, port string, topicName string, data string) {
 	}
 
 	fmt.Printf("Message sent to partition %d with offset %d\n", partition, offset)
-
 }
 
 func DataBaseFetchData(config Config) {
@@ -321,3 +318,62 @@ func DataBaseFetchData(config Config) {
 
 }
 
+func HttpDataCall(config Config) {
+
+	// Make an HTTP GET request
+	resp, err := client.R().Get(config.URL) // A URL that will return 500 error
+	if err != nil {
+		fmt.Println("Error occurred:", err)
+		return
+	}
+
+	fmt.Println("resp = ", resp.Body())
+
+	if resp.StatusCode() == 200 {
+
+	}
+
+}
+
+// sendToOutput sends transformed data to an external HTTP API
+func sendToOutput(url string, data []SaleRecord) error {
+	// Marshal the data into JSON format
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	// Make an HTTP POST request to the external API
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Check for successful response
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		log.Printf("Error response from API: %s", string(bodyBytes))
+		return err
+	}
+
+	return nil
+}
+
+// HealthCheckHandler is a basic route for checking the service status
+func HealthCheckHandler(c *gofr.Context) (interface{}, error) {
+	return "Service is up!", nil
+}
+
+// PanicRecoveryMiddleware handles panic and recovers gracefully
+func PanicRecoveryMiddleware() {
+
+	// Use defer to recover from panics
+	defer func() {
+		if r := recover(); r != nil {
+			// Log the panic details
+			log.Printf("Recovered from panic: ", r)
+		}
+	}()
+
+}

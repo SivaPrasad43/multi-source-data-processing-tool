@@ -112,7 +112,7 @@ func CreateConfiguration(c *gofr.Context) (interface{}, error) {
 			fmt.Println("error in yaml marshal = ", err)
 		}
 
-		err = ioutil.WriteFile("createdata.yaml", Createdata, 066)
+		err = ioutil.WriteFile("createdata.yaml", Createdata, 0644)
 		if err != nil {
 			fmt.Println("error in writing = ", err)
 		}
@@ -248,7 +248,6 @@ func processData(sourceID int, data []byte) {
 	log.Println(string(data))
 
 }
-
 func publisDataToKafka(ip string, port string, topicName string, data string) {
 
 	// Set up Kafka producer
@@ -321,3 +320,4 @@ func DataBaseFetchData(config Config) {
 	}
 
 }
+

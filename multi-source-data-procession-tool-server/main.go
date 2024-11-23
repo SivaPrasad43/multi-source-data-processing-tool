@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/go-resty/resty/v2"
 	"gofr.dev/pkg/gofr"
@@ -100,6 +101,12 @@ func createConfiguration(c *gofr.Context) (interface{}, error) {
 		if err != nil {
 			log.Println("Error writing to file:", err)
 			return nil, err
+		} else {
+			// Set permission to 771 (owner: rwx, group: rwx, others: x)
+			err := os.Chmod(fileName, 0771)
+			if err != nil {
+				log.Println("Failed to change file permission: %v", err)
+			}
 		}
 	} else {
 		return nil, errors.New("empty data")
@@ -112,6 +119,8 @@ func createConfiguration(c *gofr.Context) (interface{}, error) {
 func loadConfiguration(c *gofr.Context) (interface{}, error) {
 	defer panicRecoveryMiddleware()
 
+	var inputData ConfigData
+
 	configType := c.Param("configType")
 
 	// Read YAML configuration file
@@ -121,7 +130,22 @@ func loadConfiguration(c *gofr.Context) (interface{}, error) {
 		return nil, err
 	}
 
-	return string(readData), nil
+	err = yaml.Unmarshal(readData, &inputData)
+	if err != nil {
+		log.Println("Error unmarshalling YAML: ", err)
+	}
+
+	fmt.Println("inputData = ", inputData)
+	// Marshal the map to JSON
+	jsonData, err := json.Marshal(inputData)
+	if err != nil {
+		log.Fatalf("Error marshalling to JSON: %v", err)
+	}
+
+	// Print the JSON output
+	fmt.Println(string(jsonData))
+
+	return string(jsonData), nil
 }
 
 // deployConfiguration deploys the configuration based on the provided config type

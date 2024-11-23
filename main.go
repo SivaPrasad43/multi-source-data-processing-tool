@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/go-resty/resty/v2"
 	"gofr.dev/pkg/gofr"
@@ -33,6 +35,7 @@ type Config struct {
 	DBUSER     string `yaml:"DB_USER" json:"DB_USER"`
 	DBPASSWORD string `yaml:"DB_PASSWORD" json:"DB_PASSWORD"`
 	DBNAME     string `yaml:"DB_NAME" json:"DB_NAME"`
+	TableName  string `yaml:"DB_TABLE_NAME" json:"DB_TABLE_NAME"`
 	Duration   string `yaml:"Duration" json:"Duration"`
 	FILEPATH   string `yaml:"FILE_PATH" json:"FILE_PATH"`
 	S3BUCKET   string `yaml:"S3_BUCKET" json:"S3_BUCKET"`
@@ -72,34 +75,6 @@ func main() {
 	app.Run()
 }
 
-func ConfigFileReading(c *gofr.Context) {
-
-	var data configDataStruct
-	config, err := ioutil.ReadFile("config.yaml")
-	if err != nil {
-		fmt.Println("Failed to load config: %v", err)
-	}
-
-	err = yaml.Unmarshal(config, &data)
-	if err != nil {
-		fmt.Println("Failed to unmarshal config: %v", err)
-	}
-
-	fmt.Println("data = %v", data)
-
-	for _, conf := range data.DataSourceConfig {
-
-		if conf.Source == 1 {
-			for _, typeof := range conf.Config {
-				if typeof.TYPE == "HTTP" {
-					HttpDataCall(typeof)
-				}
-			}
-		}
-	}
-
-}
-
 func HttpDataCall(config Config) {
 
 	// Make an HTTP GET request
@@ -109,7 +84,7 @@ func HttpDataCall(config Config) {
 		return
 	}
 
-	fmt.Println("resp = %v", resp.Body())
+	fmt.Println("resp = ", resp.Body())
 
 	if resp.StatusCode() == 200 {
 
@@ -128,18 +103,18 @@ func CreateConfiguration(c *gofr.Context) (interface{}, error) {
 		return nil, err
 	}
 
-	fmt.Println("CreateData = %v", CreateData)
+	fmt.Println("CreateData = ", CreateData)
 
 	if len(CreateData.DataSourceConfig) > 0 {
 		Createdata, err := yaml.Marshal(CreateData)
 
 		if err != nil {
-			fmt.Println("error in yaml marshal = %v", err)
+			fmt.Println("error in yaml marshal = ", err)
 		}
 
 		err = ioutil.WriteFile("createdata.yaml", Createdata, 066)
 		if err != nil {
-			fmt.Println("error in writing = %v", err)
+			fmt.Println("error in writing = ", err)
 		}
 	} else {
 		return nil, errors.New("Empty data")
@@ -155,7 +130,7 @@ func LoadConfiguration(c *gofr.Context) (interface{}, error) {
 
 	readData, err := ioutil.ReadFile("createdata.yaml")
 	if err != nil {
-		fmt.Println("Failed to load config: %v", err)
+		fmt.Println("Failed to load config: ", err)
 		return nil, err
 	}
 
@@ -185,6 +160,7 @@ func DeployConfigData(c *gofr.Context) (interface{}, error) {
 				fmt.Println("FILE")
 			case "DB":
 				fmt.Println("DB")
+				DataBaseFetchData(typeof)
 			case "KAFKA":
 				fmt.Println("KAFKA")
 				// RunningThreads[topic] = make(chan bool) // Create a stop channel for each topic
@@ -237,7 +213,7 @@ func PanicRecoveryMiddleware() {
 	defer func() {
 		if r := recover(); r != nil {
 			// Log the panic details
-			log.Printf("Recovered from panic: %v", r)
+			log.Printf("Recovered from panic: ", r)
 		}
 	}()
 
@@ -270,7 +246,6 @@ func processData(sourceID int, data []byte) {
 	// or you can store it in a database
 	// For this example, we'll just print it
 	log.Println(string(data))
-	
 
 }
 func publisDataToKafka(ip string, port string, topicName string, data string) {
@@ -295,5 +270,53 @@ func publisDataToKafka(ip string, port string, topicName string, data string) {
 	}
 
 	fmt.Printf("Message sent to partition %d with offset %d\n", partition, offset)
+
+}
+
+func DataBaseFetchData(config Config) {
+	// Panic handler
+	defer PanicRecoveryMiddleware()
+
+	// Define the MySQL data source name (DSN)
+	// Format: username:password@tcp(hostname:port)/dbname
+	dsn := config.DBUSER + ":" + config.DBPASSWORD + "@tcp(" + config.DBHOST + ":" + strconv.Itoa(config.DBPORT) + ")/" + config.DBNAME
+
+	// Open the connection to the MySQL database
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		fmt.Println("Error opening database: ", err)
+	}
+	defer db.Close()
+
+	// Test the connection to ensure everything is set up correctly
+	err = db.Ping()
+	if err != nil {
+		fmt.Println("Error pinging database: ", err)
+	}
+
+	fmt.Println("Successfully connected to the MySQL database!")
+
+	// Example of a simple SQL query
+	var version string
+	err = db.QueryRow("SELECT VERSION()").Scan(&version)
+	if err != nil {
+		fmt.Println("Error querying database: ", err)
+	}
+	fmt.Printf("MySQL version: %s\n", version)
+
+	rows, err := db.Query("SELECT * FROM " + config.TableName)
+	if err != nil {
+		fmt.Println("Error querying users: ", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			fmt.Println("Error scanning row: ", err)
+		}
+		fmt.Printf("User: %d, Name: %s\n", id, name)
+	}
 
 }

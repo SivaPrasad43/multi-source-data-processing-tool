@@ -10,7 +10,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"reflect"
+	"strings"
 
+	"github.com/PaesslerAG/gval"
 	"github.com/go-resty/resty/v2"
 	"gofr.dev/pkg/gofr"
 	"gopkg.in/yaml.v3"
@@ -18,6 +21,26 @@ import (
 	"github.com/IBM/sarama"
 )
 
+// Example structure for holding rule definitions
+type Rule struct {
+	Key   string
+	Value interface{}
+	Op    string
+}
+
+var finalOutputData map[string]interface{}
+
+type finalOutputDataJSON struct {
+	RuleType     string
+	OutputFormat []outputRuleStructure
+}
+
+type outputRuleStructure struct {
+	key       string
+	keyType   string
+	Rule      string
+	structure []outputRuleStructure
+}
 type ConfigData struct {
 	DataSourceConfig []DataSource `yaml:"SourceData" json:"SourceData"`
 }
@@ -55,7 +78,7 @@ type SaleRecord struct {
 }
 
 var client *resty.Client
-var destinationConfig map[int][]Config
+var destinationConfig = make(map[int][]Config)
 
 // main function initializes the GoFr app and sets up routes
 func main() {
@@ -89,6 +112,8 @@ func createConfiguration(c *gofr.Context) (interface{}, error) {
 		log.Println("Error binding data:", err)
 		return nil, err
 	}
+
+	log.Println("Received data:", inputData)
 
 	fileName := configType + ".yaml"
 	if len(inputData.DataSourceConfig) > 0 {
@@ -316,6 +341,20 @@ func handleDatabaseFetchData(config Config) {
 		}
 		log.Printf("User: %d, Name: %s", id, name)
 	}
+	finalOutputData = make(map[string]interface{})
+	readData, err := ioutil.ReadFile("source/config.yaml")
+	if err != nil {
+		fmt.Println("Failed to load config: ", err)
+
+	}
+	var outputData []outputRuleStructure
+	err = yaml.Unmarshal(readData, &outputData)
+	if err != nil {
+		fmt.Println("Failed to load config: ", err)
+
+	}
+	outputInHighLevelTransform(outputData)
+	// TransformationINHighLevel(resp.Body(), finalOutputData)
 }
 
 // handleAPIInput makes an HTTP request based on the provided configuration
@@ -329,6 +368,20 @@ func handleAPIInput(config Config) {
 	log.Println("Response:", resp.Body())
 
 	if resp.StatusCode() == 200 {
+		finalOutputData = make(map[string]interface{})
+		readData, err := ioutil.ReadFile("createdata.yaml")
+		if err != nil {
+			fmt.Println("Failed to load config: ", err)
+
+		}
+		var outputData finalOutputDataJSON
+		err = yaml.Unmarshal(readData, &outputData)
+		if err != nil {
+			fmt.Println("Failed to load config: ", err)
+
+		}
+		outputInHighLevelTransform(outputData.OutputFormat)
+		TransformationINHighLevel(resp.Body(), finalOutputData, outputData.RuleType)
 		log.Println("Request succeeded with status 200")
 	}
 }
@@ -370,4 +423,214 @@ func panicRecoveryMiddleware() {
 			log.Printf("Recovered from panic: %v", r)
 		}
 	}()
+}
+
+func TransformationINHighLevel(input interface{}, output interface{}, ruleType string) ([]byte, error) {
+	// Check the type of the input
+	switch v := input.(type) {
+	case string:
+		// If the input is a string, check if it's valid JSON
+		var jsonData map[string]interface{}
+		if err := json.Unmarshal([]byte(v), &jsonData); err == nil {
+			// If it's valid JSON, return as it is
+			return json.Marshal(jsonData)
+		}
+		// If it's not valid JSON, return it as plain text in JSON
+		return json.Marshal(map[string]interface{}{
+			"data": v,
+		})
+
+	case []byte:
+		var err error
+		var data [][]interface{}
+		if err = json.Unmarshal([]byte(v), &data); err == nil {
+			header := data[0]
+			userData := data[1:]
+			// If the input is a JSON array, check if it's valid JSON
+			finalDataOutputList := make([]map[string]interface{}, 0)
+			for _, value := range userData {
+				for keyData, _ := range finalOutputData {
+
+					for index, _value := range header {
+						if _value.(string) == keyData {
+
+							finalOutputData[_value.(string)] = value[index]
+						}
+					}
+
+				}
+				finalDataOutputList = append(finalDataOutputList, finalOutputData)
+			}
+			for index, _value := range header {
+				for _, value := range userData {
+					if value[index] != nil {
+						finalOutputData[_value.(string)] = value[index]
+					}
+				}
+
+			}
+		} else {
+
+			// If the input is a string, check if it's valid JSON
+			var jsonData map[string]interface{}
+
+			if err = json.Unmarshal([]byte(v), &jsonData); err == nil {
+				value, err := gval.Evaluate(ruleType,
+					jsonData)
+				if err != nil {
+					fmt.Println(err)
+				}
+				if value == true {
+
+					for keyData, _ := range finalOutputData {
+
+						for key, value := range jsonData {
+
+							if keyData == key {
+								finalOutputData[keyData] = value
+							}
+							fmt.Println("key", key, value)
+						}
+					}
+					// If it's valid JSON, return as it is
+					return json.Marshal(finalOutputData)
+				}
+			}
+			if strings.Contains(err.Error(), "cannot unmarshal array") {
+				// If it's not valid JSON, return it as plain text in JSON
+				var jsonArrayData []map[string]interface{}
+				if err = json.Unmarshal([]byte(v), &jsonArrayData); err == nil {
+					var finalDataOutputList []map[string]interface{}
+					for _, item := range jsonArrayData {
+						value, err := gval.Evaluate(ruleType,
+							item)
+						if err != nil {
+							fmt.Println(err)
+						}
+						if value == true {
+
+							for keyData, _ := range finalOutputData {
+
+								for key, value := range item {
+									if keyData == key {
+
+										finalOutputData[keyData] = value
+
+									}
+									fmt.Println("key", key, value)
+								}
+								finalDataOutputList = append(finalDataOutputList, finalOutputData)
+							}
+						}
+					}
+
+					return json.Marshal(finalDataOutputList)
+				}
+			}
+			fmt.Println("JSON Output (Binary Data Input):", err)
+			return nil, nil
+		}
+
+	default:
+		// If the input is another type, try converting it into a JSON-friendly format
+		return json.Marshal(map[string]interface{}{
+			"data": fmt.Sprintf("Unsupported type: %v", reflect.TypeOf(input)),
+		})
+	}
+	return nil, nil
+}
+
+func outputInHighLevelTransform(outputData []outputRuleStructure) map[string]interface{} {
+
+	for _, data := range outputData {
+		switch data.keyType {
+		case "STRING":
+			finalOutputData[data.key] = ""
+		case "INT":
+			finalOutputData[data.key] = 0
+		case "ARRAY_STRING":
+			finalOutputData[data.key] = []string{}
+		case "ARRAY_INT":
+			finalOutputData[data.key] = []int{}
+		case "ARRAY_STRUCT":
+			var aryaInputMap []map[string]interface{}
+			aryaInputMap = append(aryaInputMap, outputInHighLevelTransform(data.structure))
+			finalOutputData[data.key] = aryaInputMap
+		case "STRUCT":
+			finalOutputData[data.key] = outputInHighLevelTransform(data.structure)
+		}
+	}
+	return finalOutputData
+}
+func evaluateComplexRule(data map[string]interface{}, expression string) (bool, error) {
+	// Split the expression into individual conditions (for simplicity)
+	conditions := strings.Split(expression, "&&")
+
+	// Process each condition
+	for _, condition := range conditions {
+		condition = strings.TrimSpace(condition)
+		// Each condition will be in the form of "key operator value"
+		parts := strings.Fields(condition)
+		if len(parts) != 3 {
+			return false, fmt.Errorf("invalid condition: %s", condition)
+		}
+
+		key, operator, value := parts[0], parts[1], parts[2]
+		rule := Rule{Key: key, Op: operator, Value: value}
+
+		// Evaluate the individual rule
+		result, err := evaluateRule(data, rule)
+		if err != nil {
+			return false, err
+		}
+
+		// If any condition is false, the entire expression is false
+		if !result {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+// Function to evaluate rules
+func evaluateRule(data map[string]interface{}, rule Rule) (bool, error) {
+	// Get the value from the data map
+	value, exists := data[rule.Key]
+	if !exists {
+		return false, fmt.Errorf("key %s not found in data", rule.Key)
+	}
+
+	// Apply the operator
+	switch rule.Op {
+	case "==":
+		// Check equality
+		return value == rule.Value, nil
+	case ">":
+		// Check greater than for numeric values
+		if v, ok := value.(float64); ok {
+			if val, ok := rule.Value.(float64); ok {
+				return v > val, nil
+			}
+		}
+		return false, fmt.Errorf("invalid comparison for >")
+	case "<":
+		// Check less than for numeric values
+		if v, ok := value.(float64); ok {
+			if val, ok := rule.Value.(float64); ok {
+				return v < val, nil
+			}
+		}
+		return false, fmt.Errorf("invalid comparison for <")
+	case "contains":
+		// Check if a string contains another string
+		if v, ok := value.(string); ok {
+			if val, ok := rule.Value.(string); ok {
+				return strings.Contains(v, val), nil
+			}
+		}
+		return false, fmt.Errorf("invalid comparison for contains")
+	default:
+		return false, fmt.Errorf("unsupported operator %s", rule.Op)
+	}
 }

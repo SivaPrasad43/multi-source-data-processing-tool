@@ -1,0 +1,126 @@
+<div class="container">
+    <div class="container d-flex align-items-center justify-content-between">
+        <div class="display-6">Input configuration</div>
+        <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#staticBackdrop">
+            Add Input
+        </button>
+          
+    </div>
+    <table class="table table-striped mt-4">
+        <thead>
+            <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Type</th>
+                <th scope="col">Format</th>
+                <th scope="col">Frequency</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Input 1</td>
+                <td>JSON</td>
+                <td>File</td>
+                <td>Every 1 minute</td>
+            </tr>
+            <tr>
+                <td>Input 2</td>
+                <td>CSV</td>
+                <td>API</td>
+                <td>Every 1 hour</td>
+            </tr>
+            <tr>
+                <td>Input 3</td>
+                <td>XML</td>
+                <td>Database</td>
+                <td>Every 1 day</td>
+            </tr>
+        </tbody>
+    </table>
+    
+</div>
+
+<div class="modal fade" id="staticBackdrop" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1" aria-labelledby="staticBackdropLabel" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="staticBackdropLabel">Configure Input</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body d-flex">
+        <form class="col-6" (ngSubmit)="addInput()">
+            <div class="mb-3">
+                <label for="inputType" class="form-label">Select Input Type</label>
+                <select class="form-select" id="inputType" [(ngModel)]="selectedInputType" name="inputType">
+                    <option value="" selected>Choose...</option>
+                    <option value="Database">Database</option>
+                    <option value="File">File</option>
+                    <option value="Http">Http</option>
+                    <option value="Kafka">Kafka</option>
+                </select>
+            </div>
+            <div *ngIf="selectedInputType === 'Database'" class="mb-3">
+                <label for="databaseType" class="form-label text-secondary">Database Type</label>
+                <input type="text" class="form-control mb-3" id="databaseType" [(ngModel)]="dbData.DB_TYPE" name="databaseType">
+                <label for="databaseHost" class="form-label text-secondary">Database Host</label>
+                <input type="text" class="form-control mb-3" id="databaseHost" [(ngModel)]="dbData.DB_HOST" name="databaseHost">
+                <label for="databasePort" class="form-label text-secondary">Database Port</label>
+                <input type="text" class="form-control mb-3" id="databasePort" [(ngModel)]="dbData.DB_PORT" name="databasePort">
+                <label for="databaseUser" class="form-label text-secondary">Database User</label>
+                <input type="text" class="form-control mb-3" id="databaseUser" [(ngModel)]="dbData.DB_USER" name="databaseUser">
+                <label for="databasePassword" class="form-label text-secondary">Database Password</label>
+                <input type="password" class="form-control mb-3" id="databasePassword" [(ngModel)]="dbData.DB_PASSWORD" name="databasePassword">
+                <label for="databaseName" class="form-label text-secondary">Database Name</label>
+                <input type="password" class="form-control mb-3" id="databaseName" [(ngModel)]="dbData.DB_NAME" name="databaseName">
+                <label for="databasDuration" class="form-label text-secondary">Duration</label>
+                <input type="number" class="form-control mb-3" id="databasDuration" [(ngModel)]="dbData.DURATION_TIME" name="databasDuration">
+                <select class="form-select" id="durationType" [(ngModel)]="dbData.DURATION_TYPE" name="durationType">
+                    <option value="" selected>Choose...</option>
+                    <option value="Minute">Minute</option>
+                    <option value="Hour">Hour</option>
+                </select>
+            </div>
+            <div *ngIf="selectedInputType === 'File'" class="mb-3">
+                <label for="fileType" class="form-label text-secondary">File Type</label>
+                <select class="form-select" id="fileType" [(ngModel)]="fileData.FILE_TYPE" name="fileType">
+                    <option value="" selected>Choose...</option>
+                    <option value="CSV">CSV</option>
+                    <option value="EXCEL">Excel</option>
+                </select>
+                <label for="filePath" class="form-label text-secondary">File</label>
+                <input 
+                type="file" 
+                class="form-control mb-3" 
+                id="filePath" 
+                (change)="handleFileInput($event)" 
+                name="filePath">    
+                <label for="fileDuration" class="form-label text-secondary">Duration</label>
+                <input type="number" class="form-control mb-3" id="fileDuration" [(ngModel)]="fileData.DURATION_TIME" name="fileDuration">
+                <select class="form-select" id="fileDurationType" [(ngModel)]="fileData.DURATION_TYPE" name="fileDurationType">
+                    <option value="" selected>Choose...</option>
+                    <option value="Minute">Minute</option>
+                    <option value="Hour">Hour</option>
+                </select>
+            </div>
+            <input type="submit" value="Add" class="btn btn-primary w-100 text-center">
+        </form>
+        <div class="col-lg-6">
+            <ul *ngIf="payload.length > 0;else noPayload" class="list-group list-group-flush px-4">
+                <li *ngFor="let item of payload; let i = index" class="list-group-item d-flex justify-content-between align-items-center border border-rounded">
+                    {{item.TYPE}}
+                    <button type="button" class="btn btn-outline-danger btn-sm" (click)="removeFile(i)">X</button>
+                </li>
+            </ul>  
+            <ng-template #noPayload>
+                <div class="d-flex align-items-center justify-content-center" style="height: 10rem;">
+                    <h6 class="text-center h-100 text-secondary">No payload</h6>
+                </div>
+            </ng-template>
+        </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+          <button type="button" class="btn btn-primary" (click)="createInputConfig()">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>

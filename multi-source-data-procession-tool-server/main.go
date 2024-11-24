@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,9 @@ import (
 // Global map to store stop channels for each goroutine (using name as key)
 var stopChannels = make(map[string]chan bool)
 var mu sync.Mutex
+
+// PartitionConsumer is a global variable to store the partition consumer
+var PartitionConsumer sarama.PartitionConsumer
 
 // Rule structure defines rules for transformation or filtering
 type Rule struct {
@@ -107,6 +111,9 @@ var destinationConfig = make(map[int]DataSource)
 func main() {
 	client = resty.New()
 	app := gofr.New()
+
+	processConfiguration("destinationConfig")
+	processConfiguration("sourceConfig")
 
 	// Set up API routes
 	app.POST("/updateConfiguration", updateConfiguration)
@@ -199,23 +206,30 @@ func refreshConfiguration(c *gofr.Context) (interface{}, error) {
 	defer panicRecoveryMiddleware()
 
 	var configType string
-	var incomingData ConfigData
 
 	configType = c.Param("configType")
 	log.Println("Config type:", configType)
+
+	processConfiguration(configType)
+
+	return "SUCCESSFUL", nil
+}
+
+func processConfiguration(configType string) {
+	// Process the configuration data based on the config type
+	// For example, if the config type is "database", you might create a database connection
+	var incomingData ConfigData
 	// Read the configuration file
-	readData, err := ioutil.ReadFile(configType + ".yaml")
+	readDataFromPath, err := ioutil.ReadFile(configType + ".yaml")
 	if err != nil {
 		log.Println("Failed to load config:", err)
-		return nil, err
 	}
 
 	// Unmarshal YAML data into the ConfigData struct
-	err = yaml.Unmarshal(readData, &incomingData)
+	err = yaml.Unmarshal(readDataFromPath, &incomingData)
 	if err != nil {
 		log.Println("Error unmarshalling YAML:", err)
 	}
-
 	// Handling sourceConfig and destinationConfig
 	if configType == "sourceConfig" {
 
@@ -240,24 +254,12 @@ func refreshConfiguration(c *gofr.Context) (interface{}, error) {
 					go startKafkaSubscription(sourceConfig.Source, config.IP, config.Port, config.TopicName, stopChan)
 				default:
 					// CSV
-					go ReadFile(sourceConfig.Source, config.FilePath)
+					go readInputFile(sourceConfig.Source, config.FilePath)
 					log.Println("Unknown configuration type")
 				}
 			}
 		}
 	} else if configType == "destinationConfig" {
-		// Read the destination configuration
-		readData, err := ioutil.ReadFile(configType + ".yaml")
-		if err != nil {
-			log.Println("Failed to load config:", err)
-			return nil, err
-		}
-
-		// Unmarshal destination config data
-		err = yaml.Unmarshal(readData, &incomingData)
-		if err != nil {
-			log.Println("Error unmarshalling YAML:", err)
-		}
 
 		log.Println("Destination configuration", incomingData)
 		for _, sourceConfig := range incomingData.DataSourceConfig {
@@ -266,7 +268,6 @@ func refreshConfiguration(c *gofr.Context) (interface{}, error) {
 		}
 	}
 
-	return "SUCCESSFUL", nil
 }
 
 // startKafkaSubscription starts consuming messages from a Kafka topic
@@ -279,15 +280,21 @@ func startKafkaSubscription(sourceID int, ip string, port string, topicName stri
 	defer consumer.Close()
 
 	// Start consuming from the Kafka topic
-	partitionConsumer, err := consumer.ConsumePartition(topicName, 0, sarama.OffsetNewest)
+	PartitionConsumer, err = consumer.ConsumePartition(topicName, 0, sarama.OffsetNewest)
 	if err != nil {
 		log.Fatal("Failed to start partition consumer:", err)
 	}
-	defer partitionConsumer.Close()
+	defer PartitionConsumer.Close()
 
 	// Consume messages
-	for message := range partitionConsumer.Messages() {
-		go processData(sourceID, message.Value)
+	for message := range PartitionConsumer.Messages() {
+
+		if config, ok := destinationConfig[sourceID]; ok {
+			outputInHighLevelTransform(config.TransformationConfig.OutputFormat)
+			respd, _ := TransformationINHighLevel(message.Value, finalOutputData, config.TransformationConfig.RuleType)
+			log.Println("Request succeeded ", string(respd))
+			go processData(sourceID, respd)
+		}
 	}
 }
 
@@ -317,14 +324,52 @@ func processData(sourceID int, data []byte) {
 	}
 }
 
-func ReadFile(sourceID int, fileName string) {
-	jsonData, _ := ioutil.ReadFile(fileName)
+func readInputFile(sourceID int, fileName string) {
 	if config, ok := destinationConfig[sourceID]; ok {
 		outputInHighLevelTransform(config.TransformationConfig.OutputFormat)
-		respd, _ := TransformationINHighLevel(jsonData, finalOutputData, config.TransformationConfig.RuleType)
-		log.Println("Request succeeded with status 200", string(respd))
-		go processData(sourceID, respd)
+
 	}
+	fmt.Println("Reading input file:", fileName)
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Printf("Error opening file: %v", err)
+		return
+	}
+	defer file.Close()
+
+	reader := csv.NewReader(file)
+	records, err := reader.ReadAll()
+	if err != nil {
+		log.Printf("Error reading CSV: %v", err)
+		return
+	}
+	header := records[0]
+	data := records[1:]
+	fmt.Println("fgdfsgh", header)
+	fmt.Println("fgdfsgh", data)
+	var finalDataOutputList []map[string]interface{}
+	for _, value := range data {
+		reslutData := finalOutputData
+		for keyData, _key := range reslutData {
+			for headerIndex, record := range header {
+
+				if strings.Contains(_key.(string), record) {
+
+					reslutData[keyData] = value[headerIndex]
+				}
+
+			}
+		}
+		finalDataOutputList = append(finalDataOutputList, reslutData)
+	}
+	fmt.Println("fgdfsgh", finalDataOutputList)
+
+	// Marshal the data into JSON format
+	jsonData, err := json.Marshal(finalDataOutputList)
+	if err != nil {
+		fmt.Println(err)
+	}
+	go processData(sourceID, jsonData)
 }
 
 // publishDataToKafka sends data to a Kafka topic
@@ -483,7 +528,6 @@ func handleAPIInput(sourceID int, config Config, stopChan chan bool) {
 // publishDataToAPIs sends transformed data to an exrnal HTTP API
 func publishDataToAPIs(url string, data []byte) error {
 
-
 	// Make an HTTP POST request to the external API
 	resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
 	if err != nil {
@@ -493,8 +537,6 @@ func publishDataToAPIs(url string, data []byte) error {
 
 	// Check for successful response
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := ioutil.ReadAll(resp.Body)
-		log.Printf("Error response from API: %s", string(bodyBytes))
 		return err
 	}
 
@@ -532,8 +574,9 @@ func TransformationINHighLevel(input interface{}, output interface{}, ruleType s
 
 	case []byte:
 		var err error
-		var data [][]interface{}
-		if err = json.Unmarshal([]byte(v), &data); err == nil {
+		var data []map[string]interface{}
+		if err = json.Unmarshal(v, &data); err == nil {
+			fmt.Println("Input data as a csv")
 			header := data[0]
 			userData := data[1:]
 			// If the input is a JSON array, check if it's valid JSON
@@ -549,8 +592,8 @@ func TransformationINHighLevel(input interface{}, output interface{}, ruleType s
 					reslutData := finalOutputData
 					for keyData, _key := range reslutData {
 
-						for index, _value := range header {
-							if strings.Contains(_key.(string), _value.(string)) {
+						for index, _ := range header {
+							if strings.Contains(_key.(string), "") {
 
 								reslutData[keyData] = value[index]
 							}
@@ -559,70 +602,67 @@ func TransformationINHighLevel(input interface{}, output interface{}, ruleType s
 					}
 					finalDataOutputList = append(finalDataOutputList, reslutData)
 				}
+				// If it's valid JSON, return as it is
+				return json.Marshal(finalDataOutputList)
 			}
-		} else {
-
-			// If the input is a string, check if it's valid JSON
-			var jsonData map[string]interface{}
-
-			if err = json.Unmarshal([]byte(v), &jsonData); err == nil {
-				value, err := gval.Evaluate(ruleType,
-					jsonData)
-				if err != nil {
-					fmt.Println(err)
-				}
-				if value == true || ruleType == "" {
-					reslutData := finalOutputData
-					for keyData, valueType := range reslutData {
-
-						for key, value := range jsonData {
-
-							if strings.Contains(valueType.(string), key) {
-								reslutData[keyData] = value
-							}
-							fmt.Println("key", key, value)
-						}
-					}
-					// If it's valid JSON, return as it is
-					return json.Marshal(reslutData)
-				}
-			} else {
-				if strings.Contains(err.Error(), "cannot unmarshal array") {
-					// If it's not valid JSON, return it as plain text in JSON
-					var jsonArrayData []map[string]interface{}
-					if err = json.Unmarshal([]byte(v), &jsonArrayData); err == nil {
-						var finalDataOutputList []map[string]interface{}
-
-						for _, item := range jsonArrayData {
-							value, err := gval.Evaluate(ruleType,
-								item)
-							if err != nil {
-								fmt.Println(err)
-							}
-							if value == true || ruleType == "" {
-								reslutData := finalOutputData
-								for keyData, valueType := range reslutData {
-
-									for key, value := range item {
-										if strings.Contains(valueType.(string), key) {
-
-											reslutData[keyData] = value
-
-										}
-										fmt.Println("key", key, value)
-									}
-									finalDataOutputList = append(finalDataOutputList, reslutData)
-								}
-							}
-						}
-
-						return json.Marshal(finalDataOutputList)
-					}
-				}
-			}
-			fmt.Println("JSON Output (Binary Data Input):", err)
-			return nil, nil
 		}
+		fmt.Println(err, "hdjfh")
+
+		// If the input is a string, check if it's valid JSON
+		var jsonData map[string]interface{}
+
+		if err = json.Unmarshal([]byte(v), &jsonData); err == nil {
+
+			if ruleType == "" {
+				reslutData := finalOutputData
+				for keyData, valueType := range reslutData {
+
+					for key, value := range jsonData {
+
+						if strings.Contains(valueType.(string), key) {
+							reslutData[keyData] = value
+						}
+						fmt.Println("key", key, value)
+					}
+				}
+				// If it's valid JSON, return as it is
+				return json.Marshal(reslutData)
+			}
+		}
+		if strings.Contains(err.Error(), "cannot unmarshal array") {
+			// If it's not valid JSON, return it as plain text in JSON
+			var jsonArrayData []map[string]interface{}
+			if err = json.Unmarshal([]byte(v), &jsonArrayData); err == nil {
+				var finalDataOutputList []map[string]interface{}
+
+				for _, item := range jsonArrayData {
+					value, err := gval.Evaluate(ruleType,
+						item)
+					if err != nil {
+						fmt.Println(err)
+					}
+					if value == true || ruleType == "" {
+						reslutData := finalOutputData
+						for keyData, valueType := range reslutData {
+
+							for key, value := range item {
+								if strings.Contains(valueType.(string), key) {
+
+									reslutData[keyData] = value
+
+								}
+								fmt.Println("key", key, value)
+							}
+							finalDataOutputList = append(finalDataOutputList, reslutData)
+						}
+					}
+
+				}
+				return json.Marshal(finalDataOutputList)
+			}
+		}
+		fmt.Println("JSON Output (Binary Data Input):", err)
+		return nil, nil
 
 	default:
 		// If the input is another type, try converting it into a JSON-friendly format

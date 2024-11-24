@@ -234,13 +234,13 @@ func refreshConfiguration(c *gofr.Context) (interface{}, error) {
 				switch config.Type {
 				case "API":
 					log.Println("HTTP input handler")
-					handleAPIInput(sourceConfig.Source, config, stopChan)
+					go handleAPIInput(sourceConfig.Source, config, stopChan)
 				case "KAFKA":
 					log.Println("Kafka input handler")
-					startKafkaSubscription(sourceConfig.Source, config.IP, config.Port, config.TopicName, stopChan)
+					go startKafkaSubscription(sourceConfig.Source, config.IP, config.Port, config.TopicName, stopChan)
 				default:
 					// CSV
-					ReadFile(sourceConfig.Source, config.FilePath)
+					go ReadFile(sourceConfig.Source, config.FilePath)
 					log.Println("Unknown configuration type")
 				}
 			}
@@ -482,14 +482,10 @@ func handleAPIInput(sourceID int, config Config, stopChan chan bool) {
 
 // publishDataToAPIs sends transformed data to an exrnal HTTP API
 func publishDataToAPIs(url string, data []byte) error {
-	// Marshal the data into JSON format
-	jsonData, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
+
 
 	// Make an HTTP POST request to the external API
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(data))
 	if err != nil {
 		return err
 	}
@@ -590,37 +586,38 @@ func TransformationINHighLevel(input interface{}, output interface{}, ruleType s
 					// If it's valid JSON, return as it is
 					return json.Marshal(reslutData)
 				}
-			}
-			if strings.Contains(err.Error(), "cannot unmarshal array") {
-				// If it's not valid JSON, return it as plain text in JSON
-				var jsonArrayData []map[string]interface{}
-				if err = json.Unmarshal([]byte(v), &jsonArrayData); err == nil {
-					var finalDataOutputList []map[string]interface{}
+			} else {
+				if strings.Contains(err.Error(), "cannot unmarshal array") {
+					// If it's not valid JSON, return it as plain text in JSON
+					var jsonArrayData []map[string]interface{}
+					if err = json.Unmarshal([]byte(v), &jsonArrayData); err == nil {
+						var finalDataOutputList []map[string]interface{}
 
-					for _, item := range jsonArrayData {
-						value, err := gval.Evaluate(ruleType,
-							item)
-						if err != nil {
-							fmt.Println(err)
-						}
-						if value == true || ruleType == "" {
-							reslutData := finalOutputData
-							for keyData, valueType := range reslutData {
+						for _, item := range jsonArrayData {
+							value, err := gval.Evaluate(ruleType,
+								item)
+							if err != nil {
+								fmt.Println(err)
+							}
+							if value == true || ruleType == "" {
+								reslutData := finalOutputData
+								for keyData, valueType := range reslutData {
 
-								for key, value := range item {
-									if strings.Contains(valueType.(string), key) {
+									for key, value := range item {
+										if strings.Contains(valueType.(string), key) {
 
-										reslutData[keyData] = value
+											reslutData[keyData] = value
 
+										}
+										fmt.Println("key", key, value)
 									}
-									fmt.Println("key", key, value)
+									finalDataOutputList = append(finalDataOutputList, reslutData)
 								}
-								finalDataOutputList = append(finalDataOutputList, reslutData)
 							}
 						}
-					}
 
-					return json.Marshal(finalDataOutputList)
+						return json.Marshal(finalDataOutputList)
+					}
 				}
 			}
 			fmt.Println("JSON Output (Binary Data Input):", err)

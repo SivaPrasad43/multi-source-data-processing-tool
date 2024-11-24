@@ -19,7 +19,7 @@ SourceData:
           Port: "9092"
           TopicName: test1
       TransformationConfig:
-        RuleType: "CustomerID > 10"
+        RuleType: "CustomerID == 10"
         OutputFormat: 
           - Key: "CustomerID,cid,cusID"
             DisplayName: "CustomerID"

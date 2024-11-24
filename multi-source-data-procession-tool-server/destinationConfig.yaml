@@ -1,0 +1,29 @@
+SourceData:
+    - Source: 1
+      TYPEOF:
+        - TYPE: API
+          Duration: 30m
+          URL: https://127.0.0.1:8888/UploadConfig
+        - TYPE: DB
+          DB_TYPE: mysql
+          DB_HOST: localhost
+          DB_PORT: 3307
+          DB_USER: root
+          DB_PASSWORD: root
+          DB_NAME: mydb
+          DB_TABLE_NAME: customers
+          Duration: 1h
+        - TYPE: KAFKA
+          Duration: 45m
+          IP: 127.0.0.1
+          Port: "9092"
+          TopicName: test1
+      TransformationConfig:
+        RuleType: "CustomerID > 10"
+        OutputFormat: 
+          - Key: "CustomerID,cid,cusID"
+            DisplayName: "CustomerID"
+            KeyType: "INT"
+          - Key: "Email,mailid,email"
+            DisplayName: "Email"
+            KeyType: "STRING"

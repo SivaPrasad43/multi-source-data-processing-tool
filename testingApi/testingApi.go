@@ -10,7 +10,7 @@ import (
 )
 
 type Customer struct {
-	ID    int    `json:"id"`
+	ID    int    `json:"cid"`
 	Name  string `json:"name"`
 	Email string `json:"email"`
 	Phone string `json:"phone"`
@@ -40,7 +40,7 @@ func main() {
 	app := gofr.New()
 
 	// Define an API endpoint that returns dummy customer data
-	app.GET("/customers", func(c *gofr.Context) (interface{}, error) {
+	app.GET("/loadData", func(c *gofr.Context) (interface{}, error) {
 		// Get the number of customers to generate (default 10)
 		count := 10
 		// Generate dummy customer data
@@ -49,7 +49,7 @@ func main() {
 		return customers, nil
 	})
 
-	app.POST("/UploadUser", func(c *gofr.Context) (interface{}, error) {
+	app.POST("/UploadConfig", func(c *gofr.Context) (interface{}, error) {
 		// Post call for upload user
 		return "SUCCESSFUL", nil
 	})

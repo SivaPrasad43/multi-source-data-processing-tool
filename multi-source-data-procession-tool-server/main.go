@@ -12,6 +12,8 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/PaesslerAG/gval"
 	"github.com/go-resty/resty/v2"
@@ -21,20 +23,27 @@ import (
 	"github.com/IBM/sarama"
 )
 
-// Example structure for holding rule definitions
+// Global map to store stop channels for each goroutine (using name as key)
+var stopChannels = make(map[string]chan bool)
+var mu sync.Mutex
+
+// Rule structure defines rules for transformation or filtering
 type Rule struct {
-	Key   string
-	Value interface{}
-	Op    string
+	Key   string      // The key in the data
+	Value interface{} // The value to compare against
+	Op    string      // The operation (e.g., "==", ">", "<")
 }
 
-var finalOutputData map[string]interface{}
+// Global variable for final output data after transformation
+var finalOutputData = make(map[string]interface{})
 
+// Structure for the final output data in JSON format
 type finalOutputDataJSON struct {
 	RuleType     string                `yaml:"RuleType" json:"RuleType"`
 	OutputFormat []outputRuleStructure `yaml:"OutputFormat" json:"OutputFormat"`
 }
 
+// Structure for output rule with fields for key, display name, key type, rule, and nested structure
 type outputRuleStructure struct {
 	Key         string                `yaml:"Key" json:"Key"`
 	DisplayName string                `yaml:"DisplayName" json:"DisplayName"`
@@ -42,14 +51,19 @@ type outputRuleStructure struct {
 	Rule        string                `yaml:"Rule" json:"Rule"`
 	Structure   []outputRuleStructure `yaml:"Structure" json:"Structure"`
 }
+
+// Configuration data structure with a list of data sources
 type ConfigData struct {
 	DataSourceConfig []DataSource `yaml:"SourceData" json:"SourceData"`
 }
+
+// Output format structure for customer and product
 type OutputFormat struct {
 	CustomerName string `json:"CName"`
 	ProductID    string `json:"PID"`
 }
 
+// Data source structure with source, input name, config, and transformation config
 type DataSource struct {
 	Source               int                 `yaml:"Source" json:"Source"`
 	InputName            string              `yaml:"NAME" json:"NAME"`
@@ -57,6 +71,7 @@ type DataSource struct {
 	TransformationConfig finalOutputDataJSON `yaml:"TransformationConfig" json:"TransformationConfig"`
 }
 
+// Configuration structure for various data sources
 type Config struct {
 	Type       string `yaml:"TYPE" json:"TYPE"`
 	DBType     string `yaml:"DB_TYPE" json:"DB_TYPE"`
@@ -76,6 +91,7 @@ type Config struct {
 	TopicName  string `yaml:"TopicName" json:"TopicName"`
 }
 
+// Sale record structure for customer sales data
 type SaleRecord struct {
 	ID           string  `json:"id"`
 	CustomerName string  `json:"customer_name"`
@@ -83,6 +99,7 @@ type SaleRecord struct {
 	SaleDate     string  `json:"sale_date"`
 }
 
+// Global variables for HTTP client and destination configuration
 var client *resty.Client
 var destinationConfig = make(map[int]DataSource)
 
@@ -92,27 +109,24 @@ func main() {
 	app := gofr.New()
 
 	// Set up API routes
-	app.POST("/createConfiguration", createConfiguration)
+	app.POST("/updateConfiguration", updateConfiguration)
 	app.GET("/loadConfiguration", loadConfiguration)
-	app.POST("/deployConfiguration", deployConfiguration)
+	app.POST("/refreshConfiguration", refreshConfiguration)
 	app.GET("/health", healthCheckHandler)
 
 	// Run the app
 	app.Run()
 }
 
-// createConfiguration handles the creation of a configuration
-func createConfiguration(c *gofr.Context) (interface{}, error) {
+// updateConfiguration handles the creation of a configuration
+func updateConfiguration(c *gofr.Context) (interface{}, error) {
 	defer panicRecoveryMiddleware()
 
-	var (
-		configType string
-		inputData  ConfigData
-	)
-
-	configType = c.Param("configType")
+	var configType string
+	var inputData ConfigData
 
 	// Extract JSON body into the ConfigData struct
+	configType = c.Param("configType")
 	err := c.Bind(&inputData)
 	if err != nil {
 		log.Println("Error binding data:", err)
@@ -121,23 +135,26 @@ func createConfiguration(c *gofr.Context) (interface{}, error) {
 
 	log.Println("Received data:", inputData)
 
+	// Define the file name based on the config type
 	fileName := configType + ".yaml"
 	if len(inputData.DataSourceConfig) > 0 {
+		// Marshal the data into YAML format
 		fileData, err := yaml.Marshal(inputData)
 		if err != nil {
 			log.Println("Error marshalling to YAML:", err)
 			return nil, err
 		}
 
+		// Write the YAML data to a file
 		err = ioutil.WriteFile(fileName, fileData, 0644)
 		if err != nil {
 			log.Println("Error writing to file:", err)
 			return nil, err
 		} else {
-			// Set permission to 771 (owner: rwx, group: rwx, others: x)
+			// Set file permissions
 			err := os.Chmod(fileName, 0771)
 			if err != nil {
-				log.Println("Failed to change file permission: %v", err)
+				log.Println("Failed to change file permission:", err)
 			}
 		}
 	} else {
@@ -152,85 +169,99 @@ func loadConfiguration(c *gofr.Context) (interface{}, error) {
 	defer panicRecoveryMiddleware()
 
 	var inputData ConfigData
-
 	configType := c.Param("configType")
 
-	// Read YAML configuration file
+	// Read the configuration file
 	readData, err := ioutil.ReadFile(configType + ".yaml")
 	if err != nil {
 		log.Println("Failed to load config:", err)
 		return nil, err
 	}
 
+	// Unmarshal YAML data into the ConfigData struct
 	err = yaml.Unmarshal(readData, &inputData)
 	if err != nil {
-		log.Println("Error unmarshalling YAML: ", err)
+		log.Println("Error unmarshalling YAML:", err)
 	}
 
-	fmt.Println("inputData = ", inputData)
 	// Marshal the map to JSON
 	jsonData, err := json.Marshal(inputData)
 	if err != nil {
 		log.Fatalf("Error marshalling to JSON: %v", err)
 	}
 
-	// Print the JSON output
-	fmt.Println(string(jsonData))
-
+	// Return the JSON as a string
 	return string(jsonData), nil
 }
 
-// deployConfiguration deploys the configuration based on the provided config type
-func deployConfiguration(c *gofr.Context) (interface{}, error) {
+// refreshConfiguration deploys the configuration based on the provided config type
+func refreshConfiguration(c *gofr.Context) (interface{}, error) {
 	defer panicRecoveryMiddleware()
 
-	var (
-		configType   string
-		incomingData ConfigData
-	)
+	var configType string
+	var incomingData ConfigData
 
 	configType = c.Param("configType")
 	log.Println("Config type:", configType)
+	// Read the configuration file
+	readData, err := ioutil.ReadFile(configType + ".yaml")
+	if err != nil {
+		log.Println("Failed to load config:", err)
+		return nil, err
+	}
 
+	// Unmarshal YAML data into the ConfigData struct
+	err = yaml.Unmarshal(readData, &incomingData)
+	if err != nil {
+		log.Println("Error unmarshalling YAML:", err)
+	}
+
+	// Handling sourceConfig and destinationConfig
 	if configType == "sourceConfig" {
-		// Extract JSON body into the ConfigData struct
-		err := c.Bind(&incomingData)
-		if err != nil {
-			return nil, err
-		}
+
 		for _, sourceConfig := range incomingData.DataSourceConfig {
 			for _, config := range sourceConfig.Config {
+				stopWorker(config.Type)
+
+				// Create a stop channel for this worker
+				stopChan := make(chan bool)
+
+				// Store the stop channel globally so it can be used to kill the worker
+				mu.Lock()
+				stopChannels["API"] = stopChan
+				mu.Unlock()
+				// Handle different config types (HTTP, DB, Kafka, etc.)
 				switch config.Type {
-				case "HTTP":
+				case "API":
 					log.Println("HTTP input handler")
-					handleAPIInput(sourceConfig.Source, config)
-				case "DB":
-					log.Println("Database input handler")
-					handleDatabaseFetchData(sourceConfig.Source, config)
+					handleAPIInput(sourceConfig.Source, config, stopChan)
 				case "KAFKA":
 					log.Println("Kafka input handler")
-					startKafkaSubscription(sourceConfig.Source, config.IP, config.Port, config.TopicName)
+					startKafkaSubscription(sourceConfig.Source, config.IP, config.Port, config.TopicName, stopChan)
 				default:
+					// CSV
 					ReadFile(sourceConfig.Source, config.FilePath)
 					log.Println("Unknown configuration type")
 				}
 			}
 		}
 	} else if configType == "destinationConfig" {
-		// Read YAML configuration file
+		// Read the destination configuration
 		readData, err := ioutil.ReadFile(configType + ".yaml")
 		if err != nil {
 			log.Println("Failed to load config:", err)
 			return nil, err
 		}
 
+		// Unmarshal destination config data
 		err = yaml.Unmarshal(readData, &incomingData)
 		if err != nil {
-			log.Println("Error unmarshalling YAML: ", err)
+			log.Println("Error unmarshalling YAML:", err)
 		}
 
 		log.Println("Destination configuration", incomingData)
 		for _, sourceConfig := range incomingData.DataSourceConfig {
+			// Store the source configuration in the global map
 			destinationConfig[sourceConfig.Source] = sourceConfig
 		}
 	}
@@ -239,7 +270,7 @@ func deployConfiguration(c *gofr.Context) (interface{}, error) {
 }
 
 // startKafkaSubscription starts consuming messages from a Kafka topic
-func startKafkaSubscription(sourceID int, ip string, port string, topicName string) {
+func startKafkaSubscription(sourceID int, ip string, port string, topicName string, stopChan chan bool) {
 	// Set up Kafka consumer
 	consumer, err := sarama.NewConsumer([]string{ip + ":" + port}, nil)
 	if err != nil {
@@ -268,7 +299,7 @@ func processData(sourceID int, data []byte) {
 		log.Println("Sending data to destination service")
 		for _, cfg := range config.Config {
 			switch cfg.Type {
-			case "HTTP":
+			case "API":
 				log.Println("HTTP output handler")
 				publishDataToAPIs(cfg.URL, data)
 			case "FILE":
@@ -407,25 +438,45 @@ func handleDatabaseFetchData(Source int, config Config) {
 }
 
 // handleAPIInput makes an HTTP request based on the provided configuration
-func handleAPIInput(sourceID int, config Config) {
-	resp, err := client.R().Get(config.URL)
+func handleAPIInput(sourceID int, config Config, stopChan chan bool) {
+
+	// Parse the duration
+	duration, err := parseDuration(config.Duration)
 	if err != nil {
-		log.Println("Error occurred:", err)
+		fmt.Println(err)
 		return
 	}
 
-	log.Println("Response:", resp.Body())
-
-	finalOutputData = make(map[string]interface{})
-
-	if resp.StatusCode() == 200 {
-
-		if config, ok := destinationConfig[sourceID]; ok {
-			outputInHighLevelTransform(config.TransformationConfig.OutputFormat)
-			respd, _ := TransformationINHighLevel(resp.Body(), finalOutputData, config.TransformationConfig.RuleType)
-			log.Println("Request succeeded with status 200", string(respd))
-			go processData(sourceID, respd)
+	for {
+		resp, err := client.R().Get(config.URL)
+		if err != nil {
+			log.Println("Error occurred:", err)
+			return
 		}
+
+		log.Println("Response:", string(resp.Body()))
+
+		finalOutputData = make(map[string]interface{})
+
+		if resp.StatusCode() == 200 {
+
+			if config, ok := destinationConfig[sourceID]; ok {
+				outputInHighLevelTransform(config.TransformationConfig.OutputFormat)
+				respd, _ := TransformationINHighLevel(resp.Body(), finalOutputData, config.TransformationConfig.RuleType)
+				log.Println("Request succeeded with status 200", string(respd))
+				go processData(sourceID, respd)
+			}
+		}
+		select {
+		case <-time.After(duration):
+
+			fmt.Println("API is running...")
+		case <-stopChan:
+			// Stop signal received, exit the loop and terminate the goroutine
+			fmt.Printf("%s is stopping...\n", "API")
+			return
+		}
+
 	}
 }
 
@@ -500,7 +551,7 @@ func TransformationINHighLevel(input interface{}, output interface{}, ruleType s
 
 				for _, value := range userData {
 					reslutData := finalOutputData
-					for keyData,_key := range reslutData {
+					for keyData, _key := range reslutData {
 
 						for index, _value := range header {
 							if strings.Contains(_key.(string), _value.(string)) {
@@ -678,5 +729,25 @@ func evaluateRule(data map[string]interface{}, rule Rule) (bool, error) {
 		return false, fmt.Errorf("invalid comparison for contains")
 	default:
 		return false, fmt.Errorf("unsupported operator %s", rule.Op)
+	}
+}
+
+// Function to parse the time flag (e.g., "10m" for 10 minutes, "1h" for 1 hour)
+func parseDuration(flag string) (time.Duration, error) {
+	// Parse the time string into a time.Duration
+	duration, err := time.ParseDuration(flag)
+	if err != nil {
+		return 0, fmt.Errorf("invalid time duration format: %v", err)
+	}
+	return duration, nil
+}
+
+// Function to stop a worker by name (closes the stop channel)
+func stopWorker(name string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if stopChan, exists := stopChannels[name]; exists {
+		close(stopChan)
+		delete(stopChannels, name)
 	}
 }

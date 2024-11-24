@@ -1,0 +1,12 @@
+SourceData:
+    - Source: 1
+      TYPEOF:
+        - TYPE: API
+          Duration: 30m
+          URL: http://127.0.0.1:8888/loadData
+        - TYPE: KAFKA
+          IP: 127.0.0.1
+          Port: "9092"
+          TopicName: test
+        - TYPE: CSV
+          FILE_PATH: input.csv

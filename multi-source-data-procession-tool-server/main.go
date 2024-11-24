@@ -31,24 +31,30 @@ type Rule struct {
 var finalOutputData map[string]interface{}
 
 type finalOutputDataJSON struct {
-	RuleType     string
-	OutputFormat []outputRuleStructure
+	RuleType     string                `yaml:"RuleType" json:"RuleType"`
+	OutputFormat []outputRuleStructure `yaml:"OutputFormat" json:"OutputFormat"`
 }
 
 type outputRuleStructure struct {
-	key       string
-	keyType   string
-	Rule      string
-	structure []outputRuleStructure
+	Key         string                `yaml:"Key" json:"Key"`
+	DisplayName string                `yaml:"DisplayName" json:"DisplayName"`
+	KeyType     string                `yaml:"KeyType" json:"KeyType"`
+	Rule        string                `yaml:"Rule" json:"Rule"`
+	Structure   []outputRuleStructure `yaml:"Structure" json:"Structure"`
 }
 type ConfigData struct {
 	DataSourceConfig []DataSource `yaml:"SourceData" json:"SourceData"`
 }
+type OutputFormat struct {
+	CustomerName string `json:"CName"`
+	ProductID    string `json:"PID"`
+}
 
 type DataSource struct {
-	Source    int      `yaml:"Source" json:"Source"`
-	InputName string   `yaml:"NAME" json:"NAME"`
-	Config    []Config `yaml:"TYPEOF" json:"TYPEOF"`
+	Source               int                 `yaml:"Source" json:"Source"`
+	InputName            string              `yaml:"NAME" json:"NAME"`
+	Config               []Config            `yaml:"TYPEOF" json:"TYPEOF"`
+	TransformationConfig finalOutputDataJSON `yaml:"TransformationConfig" json:"TransformationConfig"`
 }
 
 type Config struct {
@@ -78,7 +84,7 @@ type SaleRecord struct {
 }
 
 var client *resty.Client
-var destinationConfig = make(map[int][]Config)
+var destinationConfig = make(map[int]DataSource)
 
 // main function initializes the GoFr app and sets up routes
 func main() {
@@ -186,36 +192,46 @@ func deployConfiguration(c *gofr.Context) (interface{}, error) {
 	configType = c.Param("configType")
 	log.Println("Config type:", configType)
 
-	// Extract JSON body into the ConfigData struct
-	err := c.Bind(&incomingData)
-	if err != nil {
-		return nil, err
-	}
-
 	if configType == "sourceConfig" {
+		// Extract JSON body into the ConfigData struct
+		err := c.Bind(&incomingData)
+		if err != nil {
+			return nil, err
+		}
 		for _, sourceConfig := range incomingData.DataSourceConfig {
 			for _, config := range sourceConfig.Config {
 				switch config.Type {
 				case "HTTP":
 					log.Println("HTTP input handler")
-					handleAPIInput(config)
-				case "FILE":
-					log.Println("File input handler")
+					handleAPIInput(sourceConfig.Source, config)
 				case "DB":
 					log.Println("Database input handler")
-					handleDatabaseFetchData(config)
+					handleDatabaseFetchData(sourceConfig.Source, config)
 				case "KAFKA":
 					log.Println("Kafka input handler")
 					startKafkaSubscription(sourceConfig.Source, config.IP, config.Port, config.TopicName)
 				default:
+					ReadFile(sourceConfig.Source, config.FilePath)
 					log.Println("Unknown configuration type")
 				}
 			}
 		}
 	} else if configType == "destinationConfig" {
-		log.Println("Destination configuration")
+		// Read YAML configuration file
+		readData, err := ioutil.ReadFile(configType + ".yaml")
+		if err != nil {
+			log.Println("Failed to load config:", err)
+			return nil, err
+		}
+
+		err = yaml.Unmarshal(readData, &incomingData)
+		if err != nil {
+			log.Println("Error unmarshalling YAML: ", err)
+		}
+
+		log.Println("Destination configuration", incomingData)
 		for _, sourceConfig := range incomingData.DataSourceConfig {
-			destinationConfig[sourceConfig.Source] = sourceConfig.Config
+			destinationConfig[sourceConfig.Source] = sourceConfig
 		}
 	}
 
@@ -250,7 +266,7 @@ func processData(sourceID int, data []byte) {
 
 	if config, ok := destinationConfig[sourceID]; ok {
 		log.Println("Sending data to destination service")
-		for _, cfg := range config {
+		for _, cfg := range config.Config {
 			switch cfg.Type {
 			case "HTTP":
 				log.Println("HTTP output handler")
@@ -263,9 +279,20 @@ func processData(sourceID int, data []byte) {
 				log.Println("Kafka output handler")
 				publishDataToKafka(cfg.IP, cfg.Port, cfg.TopicName, string(data))
 			default:
+				publishDataToAPIs(cfg.URL, data)
 				log.Println("Unknown output type")
 			}
 		}
+	}
+}
+
+func ReadFile(sourceID int, fileName string) {
+	jsonData, _ := ioutil.ReadFile(fileName)
+	if config, ok := destinationConfig[sourceID]; ok {
+		outputInHighLevelTransform(config.TransformationConfig.OutputFormat)
+		respd, _ := TransformationINHighLevel(jsonData, finalOutputData, config.TransformationConfig.RuleType)
+		log.Println("Request succeeded with status 200", string(respd))
+		go processData(sourceID, respd)
 	}
 }
 
@@ -293,7 +320,7 @@ func publishDataToKafka(ip string, port string, topicName string, data string) {
 }
 
 // handleDatabaseFetchData fetches data from a database based on configuration
-func handleDatabaseFetchData(config Config) {
+func handleDatabaseFetchData(Source int, config Config) {
 	defer panicRecoveryMiddleware()
 
 	// Create DSN string for MySQL connection
@@ -331,34 +358,56 @@ func handleDatabaseFetchData(config Config) {
 		return
 	}
 	defer rows.Close()
-
+	// Fetch rows
+	var allRows []map[string]interface{}
 	// Print rows
 	for rows.Next() {
-		var id int
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
-			log.Println("Error scanning row:", err)
+		columns, err := rows.Columns()
+		if err != nil {
+			log.Println("Error getting columns:", err)
 		}
-		log.Printf("User: %d, Name: %s", id, name)
+
+		// Make a slice for the values
+		values := make([]sql.RawBytes, len(columns))
+
+		// rows.Scan wants pointers to values, so we must copy
+		// the references into such a slice
+		// See http://go-database-sql.org/retrieving.html
+		scanArgs := make([]interface{}, len(values))
+		for i := range values {
+			scanArgs[i] = &values[i]
+		}
+
+		for rows.Next() {
+			err = rows.Scan(scanArgs...)
+			if err != nil {
+				log.Println("Error scanning row:", err)
+			}
+
+			row := make(map[string]interface{})
+			for i, col := range columns {
+				row[col] = string(values[i])
+			}
+			allRows = append(allRows, row)
+		}
+
+	}
+	// Marshal the data into JSON format
+	jsonData, err := json.Marshal(allRows)
+	if err != nil {
+		fmt.Println(err)
 	}
 	finalOutputData = make(map[string]interface{})
-	readData, err := ioutil.ReadFile("source/config.yaml")
-	if err != nil {
-		fmt.Println("Failed to load config: ", err)
 
-	}
-	var outputData []outputRuleStructure
-	err = yaml.Unmarshal(readData, &outputData)
-	if err != nil {
-		fmt.Println("Failed to load config: ", err)
-
-	}
-	outputInHighLevelTransform(outputData)
-	// TransformationINHighLevel(resp.Body(), finalOutputData)
+	sourceConfig := destinationConfig[Source]
+	outputInHighLevelTransform(sourceConfig.TransformationConfig.OutputFormat)
+	respd, _ := TransformationINHighLevel(jsonData, finalOutputData, sourceConfig.TransformationConfig.RuleType)
+	log.Println("Request succeeded with status 200", string(respd))
+	go processData(Source, respd)
 }
 
 // handleAPIInput makes an HTTP request based on the provided configuration
-func handleAPIInput(config Config) {
+func handleAPIInput(sourceID int, config Config) {
 	resp, err := client.R().Get(config.URL)
 	if err != nil {
 		log.Println("Error occurred:", err)
@@ -367,26 +416,20 @@ func handleAPIInput(config Config) {
 
 	log.Println("Response:", resp.Body())
 
+	finalOutputData = make(map[string]interface{})
+
 	if resp.StatusCode() == 200 {
-		finalOutputData = make(map[string]interface{})
-		readData, err := ioutil.ReadFile("createdata.yaml")
-		if err != nil {
-			fmt.Println("Failed to load config: ", err)
 
+		if config, ok := destinationConfig[sourceID]; ok {
+			outputInHighLevelTransform(config.TransformationConfig.OutputFormat)
+			respd, _ := TransformationINHighLevel(resp.Body(), finalOutputData, config.TransformationConfig.RuleType)
+			log.Println("Request succeeded with status 200", string(respd))
+			go processData(sourceID, respd)
 		}
-		var outputData finalOutputDataJSON
-		err = yaml.Unmarshal(readData, &outputData)
-		if err != nil {
-			fmt.Println("Failed to load config: ", err)
-
-		}
-		outputInHighLevelTransform(outputData.OutputFormat)
-		TransformationINHighLevel(resp.Body(), finalOutputData, outputData.RuleType)
-		log.Println("Request succeeded with status 200")
 	}
 }
 
-// publishDataToAPIs sends transformed data to an external HTTP API
+// publishDataToAPIs sends transformed data to an exrnal HTTP API
 func publishDataToAPIs(url string, data []byte) error {
 	// Marshal the data into JSON format
 	jsonData, err := json.Marshal(data)
@@ -448,26 +491,27 @@ func TransformationINHighLevel(input interface{}, output interface{}, ruleType s
 			userData := data[1:]
 			// If the input is a JSON array, check if it's valid JSON
 			finalDataOutputList := make([]map[string]interface{}, 0)
-			for _, value := range userData {
-				for keyData, _ := range finalOutputData {
+			// value, err := gval.Evaluate(ruleType,
+			// 	item)
+			// if err != nil {
+			// 	fmt.Println(err)
+			// }
+			if ruleType == "" {
 
-					for index, _value := range header {
-						if _value.(string) == keyData {
-
-							finalOutputData[_value.(string)] = value[index]
-						}
-					}
-
-				}
-				finalDataOutputList = append(finalDataOutputList, finalOutputData)
-			}
-			for index, _value := range header {
 				for _, value := range userData {
-					if value[index] != nil {
-						finalOutputData[_value.(string)] = value[index]
-					}
-				}
+					reslutData := finalOutputData
+					for keyData,_key := range reslutData {
 
+						for index, _value := range header {
+							if strings.Contains(_key.(string), _value.(string)) {
+
+								reslutData[keyData] = value[index]
+							}
+						}
+
+					}
+					finalDataOutputList = append(finalDataOutputList, reslutData)
+				}
 			}
 		} else {
 
@@ -480,20 +524,20 @@ func TransformationINHighLevel(input interface{}, output interface{}, ruleType s
 				if err != nil {
 					fmt.Println(err)
 				}
-				if value == true {
-
-					for keyData, _ := range finalOutputData {
+				if value == true || ruleType == "" {
+					reslutData := finalOutputData
+					for keyData, valueType := range reslutData {
 
 						for key, value := range jsonData {
 
-							if keyData == key {
-								finalOutputData[keyData] = value
+							if strings.Contains(valueType.(string), key) {
+								reslutData[keyData] = value
 							}
 							fmt.Println("key", key, value)
 						}
 					}
 					// If it's valid JSON, return as it is
-					return json.Marshal(finalOutputData)
+					return json.Marshal(reslutData)
 				}
 			}
 			if strings.Contains(err.Error(), "cannot unmarshal array") {
@@ -501,25 +545,26 @@ func TransformationINHighLevel(input interface{}, output interface{}, ruleType s
 				var jsonArrayData []map[string]interface{}
 				if err = json.Unmarshal([]byte(v), &jsonArrayData); err == nil {
 					var finalDataOutputList []map[string]interface{}
+
 					for _, item := range jsonArrayData {
 						value, err := gval.Evaluate(ruleType,
 							item)
 						if err != nil {
 							fmt.Println(err)
 						}
-						if value == true {
-
-							for keyData, _ := range finalOutputData {
+						if value == true || ruleType == "" {
+							reslutData := finalOutputData
+							for keyData, valueType := range reslutData {
 
 								for key, value := range item {
-									if keyData == key {
+									if strings.Contains(valueType.(string), key) {
 
-										finalOutputData[keyData] = value
+										reslutData[keyData] = value
 
 									}
 									fmt.Println("key", key, value)
 								}
-								finalDataOutputList = append(finalDataOutputList, finalOutputData)
+								finalDataOutputList = append(finalDataOutputList, reslutData)
 							}
 						}
 					}
@@ -542,22 +587,23 @@ func TransformationINHighLevel(input interface{}, output interface{}, ruleType s
 
 func outputInHighLevelTransform(outputData []outputRuleStructure) map[string]interface{} {
 
+	fmt.Println(outputData, "outputData")
 	for _, data := range outputData {
-		switch data.keyType {
+		switch data.KeyType {
 		case "STRING":
-			finalOutputData[data.key] = ""
+			finalOutputData[data.DisplayName] = data.Key
 		case "INT":
-			finalOutputData[data.key] = 0
+			finalOutputData[data.DisplayName] = data.Key
 		case "ARRAY_STRING":
-			finalOutputData[data.key] = []string{}
+			finalOutputData[data.DisplayName] = data.Key
 		case "ARRAY_INT":
-			finalOutputData[data.key] = []int{}
+			finalOutputData[data.DisplayName] = data.Key
 		case "ARRAY_STRUCT":
 			var aryaInputMap []map[string]interface{}
-			aryaInputMap = append(aryaInputMap, outputInHighLevelTransform(data.structure))
-			finalOutputData[data.key] = aryaInputMap
+			aryaInputMap = append(aryaInputMap, outputInHighLevelTransform(data.Structure))
+			finalOutputData[data.DisplayName] = data.Key
 		case "STRUCT":
-			finalOutputData[data.key] = outputInHighLevelTransform(data.structure)
+			finalOutputData[data.DisplayName] = data.Key
 		}
 	}
 	return finalOutputData
